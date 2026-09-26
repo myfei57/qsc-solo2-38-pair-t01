@@ -58,6 +58,7 @@ class Projection:
             "keys": self.keys(),
             "values": {key: dict(value) for key, value in self.values.items()},
             "generations": dict(self.generations),
+            "sequences": dict(self.sequences),
             "voided": list(self.voided),
         }
 
@@ -75,7 +76,14 @@ class Projection:
         if isinstance(raw_generations, Mapping):
             for key, value in raw_generations.items():
                 view.generations[str(key)] = int(value)
-        view.sequences = {key: 0 for key in view.values}
+        # The live sequence of every key must survive the round trip: a
+        # tombstone replayed after the snapshot matches its target against it.
+        raw_sequences = payload.get("sequences", {})
+        sequences: dict[str, int] = {}
+        if isinstance(raw_sequences, Mapping):
+            for key, value in raw_sequences.items():
+                sequences[str(key)] = int(value)
+        view.sequences = {key: sequences.get(key, 0) for key in view.values}
         view.voided = [int(item) for item in payload.get("voided", [])]
         return view
 

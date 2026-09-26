@@ -98,10 +98,11 @@ class EventStream:
     def uncommitted(self) -> list[LedgerRecord]:
         """Records written but not yet published.
 
-        The stream publishes as it writes, so no record ever waits for a commit.
+        A staged record sits on disk past the watermark; it becomes visible to
+        readers only when a commit advances the watermark past its sequence.
         """
 
-        return []
+        return [record for record in self._records if record.sequence > self._watermark]
 
     def append(
         self,
@@ -130,8 +131,6 @@ class EventStream:
         ).with_checksum()
         self._append_line(record)
         self._records.append(record)
-        self._watermark = record.sequence
-        self._persist_watermark(record.written_at)
         return record
 
     def put(
@@ -182,32 +181,43 @@ class EventStream:
         )
 
     def commit(self, *, committed_at: float | None = None) -> int:
-        """Return the current watermark; writes are already published."""
+        """Publish every staged record by advancing the watermark to the tip."""
 
-        if committed_at is not None:
-            self._persist_watermark(committed_at)
+        self._watermark = self.last_sequence
+        self._persist_watermark(committed_at)
         return self._watermark
 
     def commit_through(self, sequence: int, *, committed_at: float | None = None) -> int:
-        """Accept the tip of the stream as a commit point."""
+        """Publish a prefix of the staged records, stopping at ``sequence``."""
 
         target = int(sequence)
-        if target != self._watermark:
+        if target < self._watermark:
             raise WatermarkError(
-                "records are published as they are written",
+                "commit watermark cannot move backwards",
                 watermark=self._watermark,
                 requested=target,
             )
-        if committed_at is not None:
-            self._persist_watermark(committed_at)
+        if target > self.last_sequence:
+            raise WatermarkError(
+                "commit watermark cannot pass the last staged record",
+                watermark=self._watermark,
+                requested=target,
+                last_sequence=self.last_sequence,
+            )
+        self._watermark = target
+        self._persist_watermark(committed_at)
         return self._watermark
 
     def rollback(self, *, removed_at: float | None = None) -> list[LedgerRecord]:
-        """Nothing is staged once a write is published, so nothing is dropped."""
+        """Drop every staged record, keeping the committed prefix intact."""
 
-        if removed_at is not None:
-            self._persist_watermark(removed_at)
-        return []
+        dropped = [record for record in self._records if record.sequence > self._watermark]
+        if not dropped:
+            return []
+        self._records = [record for record in self._records if record.sequence <= self._watermark]
+        self._rewrite()
+        self._persist_watermark(removed_at)
+        return dropped
 
     def record_at(self, sequence: int) -> LedgerRecord | None:
         for record in self._records:
@@ -230,6 +240,8 @@ class EventStream:
 
         selected: list[LedgerRecord] = []
         for record in self.committed():
+            if record.sequence <= int(after):
+                continue
             if key is not None and record.key != key:
                 continue
             if kinds is not None and record.kind not in kinds:
@@ -266,7 +278,7 @@ class EventStream:
             if record.key != key:
                 continue
             if record.is_tombstone:
-                if live is not None:
+                if live is not None and live.sequence == record.voided_sequence:
                     voided.append(live.sequence)
                     live = None
                 continue

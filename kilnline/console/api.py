@@ -402,7 +402,9 @@ class Router:
         )
 
     def _commit_ledger(self, query: Mapping[str, Any], body: dict[str, Any]) -> dict[str, Any]:
-        return self.service.commit_ledger()
+        return self.service.commit_ledger(
+            through=integer(body, "through", required=False, default=None, minimum=0),
+        )
 
     def _rollback_ledger(self, query: Mapping[str, Any], body: dict[str, Any]) -> dict[str, Any]:
         return self.service.rollback_ledger()

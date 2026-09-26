@@ -1069,9 +1069,14 @@ class ControlService:
 
     # ------------------------------------------------------------------- ledger
 
-    def commit_ledger(self) -> dict[str, Any]:
+    def commit_ledger(self, through: int | None = None) -> dict[str, Any]:
+        """Publish staged records, optionally only the prefix up to ``through``."""
+
         before = self.stream.watermark
-        watermark = self.stream.commit(committed_at=self._now())
+        if through is None:
+            watermark = self.stream.commit(committed_at=self._now())
+        else:
+            watermark = self.stream.commit_through(int(through), committed_at=self._now())
         self.projection = Projection.from_dict(replay(self.stream).projection)
         self.audit.record("ledger", "records committed", self._now(), watermark=watermark)
         return {"before": before, "watermark": watermark, "state": self.stream.watermark_state().as_dict()}
