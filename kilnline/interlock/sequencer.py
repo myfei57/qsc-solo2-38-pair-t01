@@ -136,6 +136,23 @@ class StageSequencer:
     def is_complete(self, name: str) -> bool:
         return str(name) in self.completions
 
+    def restore_completed(self, stages: dict[str, float]) -> list[str]:
+        """Re-mark stages confirmed by an earlier run during recovery.
+
+        Unlike :meth:`complete`, this does not enforce ordering: a snapshot may
+        legitimately contain several consecutive confirmations, and the stored
+        state itself is the evidence that the order was followed.
+        """
+
+        restored: list[str] = []
+        for name, completed_at in stages.items():
+            stage_name = str(name)
+            if stage_name not in self.order or stage_name in self.completions:
+                continue
+            self.completions[stage_name] = float(completed_at)
+            restored.append(stage_name)
+        return restored
+
     def completed(self) -> list[str]:
         return [stage.name for stage in self.stages if stage.name in self.completions]
 

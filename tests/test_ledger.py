@@ -213,6 +213,51 @@ def test_query_only_returns_committed_records(tmp_path: Path) -> None:
     assert query.keys(QueryFilter()) == ["a"]
 
 
+def test_committed_prefix_survives_restart_while_a_later_tombstone_stays_effective(
+    tmp_path: Path,
+) -> None:
+    """Voiding stays effective after restart even when confirmed segment-first."""
+
+    store = JsonFileStore(tmp_path)
+    stream = make_stream(tmp_path, store)
+    stream.put("batch:n-1", {"status": "open"}, written_at=1.0)
+    stream.put("batch:n-2", {"status": "open"}, written_at=2.0)
+    stream.put("batch:n-3", {"status": "open"}, written_at=3.0)
+    stream.commit_through(2, committed_at=4.0)
+    restarted = make_stream(tmp_path, store)
+    assert restarted.watermark == 2
+    assert [record.key for record in restarted.committed()] == ["batch:n-1", "batch:n-2"]
+    restarted.append_tombstone(1, written_at=5.0, reason="night shift void")
+    restarted.commit(committed_at=6.0)
+    reopened = make_stream(tmp_path, store)
+    live, voided = reopened.resolve("batch:n-1")
+    assert live is None
+    assert voided == [1]
+
+
+def test_tombstone_in_the_replay_window_hides_a_snapshot_live_record(
+    tmp_path: Path,
+) -> None:
+    """A snapshot carry live sequences so a post-snapshot tombstone still applies."""
+
+    store = JsonFileStore(tmp_path)
+    stream = make_stream(tmp_path, store)
+    stream.put("batch:n-1", {"status": "open"}, written_at=1.0)
+    stream.commit(committed_at=2.0)
+    projection = Projection()
+    projection.apply(stream.committed()[0])
+    assert projection.as_dict()["sequences"] == {"batch:n-1": 1}
+
+    stream.append_tombstone(1, written_at=3.0, reason="voided")
+    stream.commit(committed_at=4.0)
+    restarted = make_stream(tmp_path, store)
+    view = Projection.from_dict(projection.as_dict())
+    outcome = replay(restarted, after_watermark=1, projection=view)
+    assert outcome.applied == (2,)
+    assert outcome.voided == (1,)
+    assert outcome.projection["values"] == {}
+
+
 def test_stream_verifies_sequence_and_watermark_consistency(tmp_path: Path) -> None:
     stream = make_stream(tmp_path)
     stream.put("a", {"n": 1}, written_at=1.0, generation=3, reason="test")

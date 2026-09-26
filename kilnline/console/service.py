@@ -277,11 +277,15 @@ class ControlService:
 
         integrity = self.stream.verify()
         snapshot = self.snapshots.latest()
+        restored_stages: list[str] = []
         if snapshot is None:
             from_watermark = 0
         else:
             self.projection = Projection.from_dict(snapshot.state.get("projection", {}))
             from_watermark = snapshot.watermark
+            before = set(self.production.completed())
+            self._restore_snapshot_state(snapshot.state, at=float(snapshot.captured_at))
+            restored_stages = [name for name in self.production.completed() if name not in before]
         outcome = replay(self.stream, after_watermark=from_watermark, projection=self.projection)
         self.projection = Projection.from_dict(outcome.projection)
         committed = self.stream.committed()
@@ -299,6 +303,7 @@ class ControlService:
             "restored_parameter_generation": None if restored_parameters is None else restored_parameters.generation,
             "restored_zone_map_generation": None if restored_map is None else restored_map.generation,
             "snapshot_revision": None if snapshot is None else snapshot.revision,
+            "restored_stages": restored_stages,
             "truncated_tail": bool(integrity["truncated_tail"]),
         }
         self.audit.record(
@@ -317,6 +322,32 @@ class ControlService:
         """Wall-clock stamp used for records and expiry checks."""
 
         return self._now()
+
+    def _restore_snapshot_state(self, state: Mapping[str, Any], *, at: float) -> None:
+        """Restore the non-ledger workflow state captured at the last snapshot.
+
+        Ledger-backed registries are rebuilt by replay; this covers the state the
+        operators think of as "confirmed up to this step": production stage
+        progress, open gates and tripped latches.  Restart must stop exactly
+        where the shift left it rather than resetting any of these.
+        """
+
+        production = state.get("production", {})
+        if isinstance(production, Mapping):
+            completed = production.get("completed", [])
+            if isinstance(completed, (list, tuple)):
+                staged = {name: at for name in self.production.order if name in completed}
+                self.production.restore_completed(staged)
+        for name in state.get("gates", []) or []:
+            try:
+                self.gates.satisfy(str(name), at=at, detail="restored from snapshot")
+            except NotFoundError:
+                continue
+        for name in state.get("latches", []) or []:
+            try:
+                self.latches.trip(str(name), "restored from snapshot", at=at)
+            except NotFoundError:
+                continue
 
     def _mono(self) -> float:
         return float(self.clock.monotonic())

@@ -32,9 +32,9 @@ class Projection:
             target = record.voided_sequence
             if target is None:
                 return False
-            self.voided.append(target)
             if self.sequences.get(record.key) != target:
                 return False
+            self.voided.append(target)
             self.values.pop(record.key, None)
             self.generations.pop(record.key, None)
             self.sequences.pop(record.key, None)
@@ -58,6 +58,7 @@ class Projection:
             "keys": self.keys(),
             "values": {key: dict(value) for key, value in self.values.items()},
             "generations": dict(self.generations),
+            "sequences": dict(self.sequences),
             "voided": list(self.voided),
         }
 
@@ -75,7 +76,16 @@ class Projection:
         if isinstance(raw_generations, Mapping):
             for key, value in raw_generations.items():
                 view.generations[str(key)] = int(value)
-        view.sequences = {key: 0 for key in view.values}
+        raw_sequences = payload.get("sequences", {})
+        if isinstance(raw_sequences, Mapping):
+            for key, value in raw_sequences.items():
+                if str(key) in view.values:
+                    view.sequences[str(key)] = int(value)
+        # Snapshots written before sequences were persisted carry only live keys;
+        # sequence zero never matches a real tombstone target, so such snapshots
+        # must be replayed from the beginning of the stream.
+        for key in view.values:
+            view.sequences.setdefault(key, 0)
         view.voided = [int(item) for item in payload.get("voided", [])]
         return view
 
@@ -114,14 +124,19 @@ def replay(
     """Re-apply committed records newer than ``after_watermark``."""
 
     view = Projection() if projection is None else projection
+    applied_before = len(view.applied)
     records = stream.replay(after_watermark=after_watermark)
     for record in records:
         view.apply(record)
     return ReplayOutcome(
         from_watermark=int(after_watermark),
         to_watermark=stream.watermark,
-        applied=tuple(view.applied),
-        voided=tuple(view.voided),
+        applied=tuple(view.applied[applied_before:]),
+        voided=tuple(
+            record.voided_sequence
+            for record in records
+            if record.is_tombstone and record.voided_sequence is not None
+        ),
         projection=view.as_dict(),
     )
 

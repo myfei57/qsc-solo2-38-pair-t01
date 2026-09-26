@@ -168,3 +168,14 @@ def test_sequencer_progress_and_reset() -> None:
     assert sequencer.completed() == []
     assert sequencer.resets == 1
     assert sequencer.last_reset_reason == "restart"
+
+
+def test_sequencer_restore_completed_marks_confirmed_stages() -> None:
+    sequencer = StageSequencer(
+        "production", (Stage("drying"), Stage("glazing", ("drying",)), Stage("feeding", ("glazing",)))
+    )
+    restored = sequencer.restore_completed({"drying": 4.0, "glazing": 7.0, "feeding": 9.0})
+    assert restored == ["drying", "glazing", "feeding"]
+    assert sequencer.pending() == []
+    # Unknown stages and double restores are ignored.
+    assert sequencer.restore_completed({"drying": 4.0, "firing": 9.0}) == []

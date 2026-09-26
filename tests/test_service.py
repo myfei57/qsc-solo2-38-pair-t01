@@ -193,6 +193,42 @@ def test_uncommitted_records_stay_invisible_after_a_restart(
     assert restarted.replay_ledger(after_watermark=0)["applied"]
 
 
+def test_voided_batch_stays_gone_after_restart(
+    prepared: ControlService,
+    settings: Settings,
+) -> None:
+    prepared.open_batch(BATCH, work_order="WO-1", car_count=1)
+    prepared.capture_snapshot(reason="shift_handover")
+    prepared.void_batch(BATCH, reason="night shift void")
+
+    restarted = ControlService(settings, ManualClock(), simulation=True)
+    assert restarted.batches.seen(BATCH) is False
+    assert f"batch:{BATCH}" not in restarted.projection.values
+    # A voided code is released for reuse instead of being stuck as a duplicate.
+    reopened = restarted.open_batch(BATCH, work_order="WO-2", car_count=2)
+    assert reopened["status"] == "open"
+    assert reopened["car_count"] == 2
+
+
+def test_restart_resumes_at_the_last_confirmed_production_stage(
+    prepared: ControlService,
+    settings: Settings,
+    clock: ManualClock,
+) -> None:
+    from conftest import advance
+
+    prepared.load_car(CARS[0])
+    advance(prepared, clock, 30.0)
+    prepared.complete_drying(CARS[0])
+    prepared.production.complete("drying", at=prepared.now())
+    prepared.capture_snapshot(reason="shift_handover")
+
+    restarted = ControlService(settings, ManualClock(), simulation=True)
+    assert restarted.production.completed() == ["drying"]
+    assert restarted.production.pending() == ["glazing", "feeding", "rolling", "firing"]
+    assert restarted.recovery_report["restored_stages"] == ["drying"]
+
+
 def test_recovery_resumes_from_the_snapshot_watermark(prepared: ControlService) -> None:
     snapshot = prepared.latest_snapshot()
     assert snapshot is not None
